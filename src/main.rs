@@ -58,13 +58,16 @@ struct RadialGaussian {
 }
 
 impl RadialGaussian {
-    fn new(m: f64, s: f64) -> Self {
-        let min_sr = (m - 3.0 * s).max(0.0);
+    fn new(m: f64, s: f64) -> Option<Self> {
+        let min_sr = m - 3.0 * s;
+        if min_sr <= f64::EPSILON {
+            return None;
+        }
         let max_sr = m + 3.0 * s;
-        Self {
+        Some(Self {
             gaussian: Gaussian{ m, s },
             min_sr, max_sr
-        }
+        })
     }
 }
 
@@ -93,7 +96,7 @@ impl RadialWavelet for RadialGaussian {
 
     fn at(&self, x: f64, y: f64) -> f64 {
         let r = (x * x + y * y).sqrt();
-        self.gaussian.at(r)
+        self.gaussian.at(r) / r
     }
 
     fn ati(&self, x: i64, y: i64) -> f64 {
@@ -123,13 +126,16 @@ struct RadialHeaviside {
 }
 
 impl RadialHeaviside {
-    fn new(radius: f64, thickness: f64) -> Self {
-        let min_sr = (radius - thickness).max(0.0);
+    fn new(radius: f64, thickness: f64) -> Option<Self> {
+        let min_sr = radius - thickness;
+        if min_sr <= f64::EPSILON {
+            return None;
+        }
         let max_sr = radius + thickness;
-        Self {
+        Some(Self {
             radius, thickness,
             min_sr, max_sr
-        }
+        })
     }
 }
 
@@ -147,7 +153,7 @@ impl RadialWavelet for RadialHeaviside {
         if r < self.min_sr || r > self.max_sr {
             0.0
         } else {
-            1.0
+            1.0 / r
         }
     }
 
@@ -156,12 +162,12 @@ impl RadialWavelet for RadialHeaviside {
         if r < self.min_sr || r > self.max_sr {
             0.0
         } else {
-            1.0
+            1.0 / r
         }
     }
 
     fn prod_at_sigpt(&self, f: f64, x: i64, y: i64) -> f64 {
-        f
+        f / ((x * x + y * y) as f64).sqrt()
     }
 
     fn min_significant_radius(&self) -> f64 {
@@ -211,20 +217,18 @@ fn wavelet_transform_at_outer(
     let xlen = f.len();
     let ylen = f[0].len();
 
-    let mut inside_count = 0;
     sigpts.iter().map(
         |&(wx, wy)| {
             let bwx = bx as i64 + wx;
             let bwy = by as i64 + wy;
 
             if bwx >= 0 && bwx < xlen as i64 && bwy >= 0 && bwy < ylen as i64 {
-                inside_count += 1;
                 wavelet.prod_at_sigpt(f[bwx as usize][bwy as usize], wx, wy)
             } else {
                 0.0
             }
         }
-    ).sum::<f64>() / inside_count as f64 * sigpts.len() as f64
+    ).sum::<f64>()
 }
 
 fn wavelet_transform(f: &Vec<Vec<f64>>, wavelet: impl RadialWavelet) -> Vec<Vec<f64>> {
@@ -263,7 +267,10 @@ fn wavelet_transform(f: &Vec<Vec<f64>>, wavelet: impl RadialWavelet) -> Vec<Vec<
     res
 }
 
-fn wavelet_transform_with_pow(f: &Vec<Vec<f64>>, wavelet: impl RadialWavelet, pow: f64) -> Vec<Vec<f64>> {
+fn wavelet_transform_with_scale(
+    f: &Vec<Vec<f64>>, wavelet: impl RadialWavelet, 
+    scale: impl Fn(f64) -> f64
+) -> Vec<Vec<f64>> {
     let sigpts = wavelet.significant_points();
     let xlen = f.len();
     let ylen = f[0].len();
@@ -275,24 +282,24 @@ fn wavelet_transform_with_pow(f: &Vec<Vec<f64>>, wavelet: impl RadialWavelet, po
     let inner_yend = ylen - inner_ybeg;
     for bx in inner_xbeg..inner_xend {
         for by in inner_ybeg..inner_yend {
-            res[bx][by] = wavelet_transform_at_inner(f, wavelet, &sigpts, bx, by).powf(pow);
+            res[bx][by] = scale(wavelet_transform_at_inner(f, wavelet, &sigpts, bx, by));
         }
     }
 
     for by in 0..ylen {
         for bx in 0..inner_xbeg {
-            res[bx][by] = wavelet_transform_at_outer(f, wavelet, &sigpts, bx, by).powf(pow);
+            res[bx][by] = scale(wavelet_transform_at_outer(f, wavelet, &sigpts, bx, by));
         }
         for bx in inner_xend..xlen {
-            res[bx][by] = wavelet_transform_at_outer(f, wavelet, &sigpts, bx, by).powf(pow);
+            res[bx][by] = scale(wavelet_transform_at_outer(f, wavelet, &sigpts, bx, by));
         }
     }
     for bx in inner_xbeg..inner_xend {
         for by in 0..inner_ybeg {
-            res[bx][by] = wavelet_transform_at_outer(f, wavelet, &sigpts, bx, by).powf(pow);
+            res[bx][by] = scale(wavelet_transform_at_outer(f, wavelet, &sigpts, bx, by));
         }
         for by in inner_yend..ylen {
-            res[bx][by] = wavelet_transform_at_outer(f, wavelet, &sigpts, bx, by).powf(pow);
+            res[bx][by] = scale(wavelet_transform_at_outer(f, wavelet, &sigpts, bx, by));
         }
     }
 
@@ -346,26 +353,29 @@ fn main() {
 
     let mut wfs = Vec::<Vec<Vec<f64>>>::new();
     let mut wwfs = Vec::<Vec<Vec<f64>>>::new();
-    let s = 0.3;
-    for m in (0..100).step_by(1).map(|m| m as f64) {
-        // let w = RadialGaussian::new(m, s);
-        let w = RadialHeaviside::new(m, s * 3.0);
+    let mut radiuses = Vec::new();
+    let thickness = 2.0;
+    for radius in (4..100).step_by(1).map(|r| r as f64) {
+        // let w = RadialGaussian::new(radius, thickness / 3.0);
+        let w = RadialHeaviside::new(radius, thickness).unwrap();
         println!(
-            "radius:{}, thickness={}, sigpts num: {}", 
+            "radius: {}, thickness: {}, sigpts num: {}", 
             w.radius(), w.thickness(), w.significant_points().len()
         );
-        let wf = wavelet_transform_with_pow(&f, w, 4.0);
+        let wf = wavelet_transform_with_scale(&f, w, |f| (4.0 * f).exp_m1());
         let wwf = wavelet_transform(&wf, w);
         wfs.push(wf);
         wwfs.push(wwf);
+        radiuses.push(radius);
     }
     output_fields(&wfs, "wfs.ssv");
     output_fields(&wwfs, "wwfs.ssv");
 
-    // let psi = Psi::new(5.0, 0.2);
-    // println!("sigpts num: {}", significant_points(psi).len());
-    // let wf = wavelet_transform(&f, psi);
-    // let wwf = wavelet_transform(&wf, psi);
-    // output_field(&wf, "wf.ssv");
-    // output_field(&wwf, "wwf.ssv");
+    let mut radiuses_file = File::create("r.ssv").unwrap();
+    write!(radiuses_file, "{}", 
+        radiuses.into_iter()
+            .map(|x| x.to_string())
+            .reduce(|acc, x| format!("{} {}", acc, x))
+            .unwrap()
+    ).unwrap();
 }
