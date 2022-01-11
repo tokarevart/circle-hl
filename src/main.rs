@@ -91,7 +91,7 @@ impl RadialWavelet for RadialGaussian {
     }
 
     fn thickness(&self) -> f64 {
-        3.0 * self.s
+        6.0 * self.s
     }
 
     fn at(&self, x: f64, y: f64) -> f64 {
@@ -127,11 +127,11 @@ struct RadialHeaviside {
 
 impl RadialHeaviside {
     fn new(radius: f64, thickness: f64) -> Option<Self> {
-        let min_sr = radius - thickness;
+        let min_sr = radius - thickness * 0.5;
         if min_sr <= f64::EPSILON {
             return None;
         }
-        let max_sr = radius + thickness;
+        let max_sr = radius + thickness * 0.5;
         Some(Self {
             radius, thickness,
             min_sr, max_sr
@@ -153,7 +153,7 @@ impl RadialWavelet for RadialHeaviside {
         if r < self.min_sr || r > self.max_sr {
             0.0
         } else {
-            1.0 / r
+            1.0 / (r * self.thickness())
         }
     }
 
@@ -162,7 +162,7 @@ impl RadialWavelet for RadialHeaviside {
         if r < self.min_sr || r > self.max_sr {
             0.0
         } else {
-            1.0 / r
+            1.0 / (r * self.thickness())
         }
     }
 
@@ -179,25 +179,82 @@ impl RadialWavelet for RadialHeaviside {
     }
 }
 
-// fn significant_points_with_scale(psi: Psi, a: f64) -> Vec<(i64, i64)> {
-//     let min_r = a * (psi.m - 3.0 * psi.s).max(0.0);
-//     let max_r = a * (psi.m + 3.0 * psi.s);
-//     let sqr_min_r = min_r * min_r;
-//     let sqr_max_r = max_r * max_r;
-//     let end = max_r.ceil() as i64 + 1;
-//     let beg = 1 - end;
-//     let max_size = (end - beg) * (end - beg);
-//     let mut res = Vec::with_capacity(max_size as usize);
-//     for x in beg..end {
-//         for y in beg..end {
-//             let sqr_r = (x * x + y * y) as f64;
-//             if sqr_r >= sqr_min_r && sqr_r <= sqr_max_r {
-//                 res.push((x, y));
-//             }
-//         }
-//     }
-//     res
-// }
+#[derive(Debug, Clone, Copy)]
+struct RadialHaar {
+    radius: f64,
+    thickness: f64,
+    min_sr: f64,
+    max_sr: f64,
+}
+
+impl RadialHaar {
+    fn new(radius: f64, thickness: f64) -> Option<Self> {
+        let min_sr = radius - thickness * 0.5;
+        if min_sr <= f64::EPSILON {
+            return None;
+        }
+        let max_sr = radius + thickness * 0.5;
+        Some(Self {
+            radius, thickness,
+            min_sr, max_sr
+        })
+    }
+}
+
+impl RadialWavelet for RadialHaar {
+    fn radius(&self) -> f64 {
+        self.radius
+    }
+
+    fn thickness(&self) -> f64 {
+        self.thickness
+    }
+
+    fn at(&self, x: f64, y: f64) -> f64 {
+        let r = (x * x + y * y).sqrt();
+        if r < self.min_sr || r > self.max_sr {
+            0.0
+        } else if r < self.radius() {
+            1.0 / (r * self.thickness())
+        } else if r > self.radius() {
+            -1.0 / (r * self.thickness())
+        } else {
+            0.0
+        }
+    }
+
+    fn ati(&self, x: i64, y: i64) -> f64 {
+        let r = ((x * x + y * y) as f64).sqrt();
+        if r < self.min_sr || r > self.max_sr {
+            0.0
+        } else if r < self.radius() {
+            1.0 / (r * self.thickness())
+        } else if r > self.radius() {
+            -1.0 / (r * self.thickness())
+        } else {
+            0.0
+        }
+    }
+
+    fn prod_at_sigpt(&self, f: f64, x: i64, y: i64) -> f64 {
+        let r = ((x * x + y * y) as f64).sqrt();
+        if r < self.radius() {
+            f / (r * self.thickness())
+        } else if r > self.radius() {
+            -f / (r * self.thickness())
+        } else {
+            0.0
+        }
+    }
+
+    fn min_significant_radius(&self) -> f64 {
+        self.min_sr
+    }
+
+    fn max_significant_radius(&self) -> f64 {
+        self.max_sr
+    }
+}
 
 fn wavelet_transform_at_inner(
     f: &Vec<Vec<f64>>, wavelet: impl RadialWavelet, sigpts: &Vec<(i64, i64)>, bx: usize, by: usize
@@ -232,39 +289,7 @@ fn wavelet_transform_at_outer(
 }
 
 fn wavelet_transform(f: &Vec<Vec<f64>>, wavelet: impl RadialWavelet) -> Vec<Vec<f64>> {
-    let sigpts = wavelet.significant_points();
-    let xlen = f.len();
-    let ylen = f[0].len();
-    let mut res = vec![vec![-1.0; ylen]; xlen];
-
-    let inner_xbeg = wavelet.max_significant_radius().ceil() as usize;
-    let inner_xend = xlen - inner_xbeg;
-    let inner_ybeg = inner_xbeg;
-    let inner_yend = ylen - inner_ybeg;
-    for bx in inner_xbeg..inner_xend {
-        for by in inner_ybeg..inner_yend {
-            res[bx][by] = wavelet_transform_at_inner(f, wavelet, &sigpts, bx, by);
-        }
-    }
-
-    for by in 0..ylen {
-        for bx in 0..inner_xbeg {
-            res[bx][by] = wavelet_transform_at_outer(f, wavelet, &sigpts, bx, by);
-        }
-        for bx in inner_xend..xlen {
-            res[bx][by] = wavelet_transform_at_outer(f, wavelet, &sigpts, bx, by);
-        }
-    }
-    for bx in inner_xbeg..inner_xend {
-        for by in 0..inner_ybeg {
-            res[bx][by] = wavelet_transform_at_outer(f, wavelet, &sigpts, bx, by);
-        }
-        for by in inner_yend..ylen {
-            res[bx][by] = wavelet_transform_at_outer(f, wavelet, &sigpts, bx, by);
-        }
-    }
-
-    res
+    wavelet_transform_with_scale(f, wavelet, |x| x)
 }
 
 fn wavelet_transform_with_scale(
@@ -274,7 +299,7 @@ fn wavelet_transform_with_scale(
     let sigpts = wavelet.significant_points();
     let xlen = f.len();
     let ylen = f[0].len();
-    let mut res = vec![vec![-1.0; ylen]; xlen];
+    let mut res = vec![vec![f64::NAN; ylen]; xlen];
 
     let inner_xbeg = wavelet.max_significant_radius().ceil() as usize;
     let inner_xend = xlen - inner_xbeg;
@@ -350,19 +375,29 @@ fn output_fields(fs: &Vec<Vec<Vec<f64>>>, path: &str) {
 
 fn main() {
     let f = input_field("f.tsv");
+    let maxf = f.iter().flatten().max_by(|&a, &b| a.partial_cmp(b).unwrap()).unwrap();
+    dbg!(maxf);
+    let w = RadialHaar::new(1000.0, 100.0).unwrap();
+    let sigpts = w.significant_points();
+    let sigsum: f64 = sigpts.into_iter().map(|(x, y)| w.ati(x, y)).sum();
+    dbg!(sigsum);
+    // return;
 
     let mut wfs = Vec::<Vec<Vec<f64>>>::new();
     let mut wwfs = Vec::<Vec<Vec<f64>>>::new();
     let mut radiuses = Vec::new();
-    let thickness = 2.0;
-    for radius in (4..100).step_by(1).map(|r| r as f64) {
+    let thickness = 4.0;
+    let scale_param = 16.0;
+    for radius in (thickness as usize..60).step_by(1).map(|r| r as f64) {
         // let w = RadialGaussian::new(radius, thickness / 3.0);
-        let w = RadialHeaviside::new(radius, thickness).unwrap();
+        let w = RadialHaar::new(radius, thickness).unwrap();
         println!(
             "radius: {}, thickness: {}, sigpts num: {}", 
             w.radius(), w.thickness(), w.significant_points().len()
         );
-        let wf = wavelet_transform_with_scale(&f, w, |f| (4.0 * f).exp_m1());
+        let wf = wavelet_transform_with_scale(&f, w, 
+            |f| f.signum() * (scale_param * f.abs()).exp_m1() / scale_param.exp_m1()
+        );
         let wwf = wavelet_transform(&wf, w);
         wfs.push(wf);
         wwfs.push(wwf);
