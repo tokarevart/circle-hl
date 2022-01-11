@@ -381,7 +381,6 @@ fn main() {
     let sigpts = w.significant_points();
     let sigsum: f64 = sigpts.into_iter().map(|(x, y)| w.ati(x, y)).sum();
     dbg!(sigsum);
-    // return;
 
     let mut wfs = Vec::<Vec<Vec<f64>>>::new();
     let mut wwfs = Vec::<Vec<Vec<f64>>>::new();
